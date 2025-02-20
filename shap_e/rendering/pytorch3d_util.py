@@ -37,9 +37,9 @@ def render_images(
     lights: Any,
     sigma: float = DEFAULT_RENDER_SIGMA,
     gamma: float = DEFAULT_RENDER_GAMMA,
-    max_faces_per_bin=100000,
+    max_faces_per_bin=1000000, # CHANGED FROM 10,000
     faces_per_pixel=50,
-    bin_size=None,
+    bin_size=0, # CHANGED FROM NONE
     use_checkpoint: bool = False,
 ) -> torch.Tensor:
     if use_checkpoint:
