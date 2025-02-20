@@ -1,0 +1,29 @@
+Python location: /panfs/accrepfs.vampire/home/bruggecr/shap-e/shap-e-env/bin/python
+Python sys.path: ['', '/accre/arch/easybuild/software/Compiler/GCCcore/11.3.0/Python/3.10.4/easybuild/python', '/accre/arch/easybuild/software/Compiler/GCCcore/11.3.0/Python/3.10.4/lib/python310.zip', '/accre/arch/easybuild/software/Compiler/GCCcore/11.3.0/Python/3.10.4/lib/python3.10', '/accre/arch/easybuild/software/Compiler/GCCcore/11.3.0/Python/3.10.4/lib/python3.10/lib-dynload', '/panfs/accrepfs.vampire/home/bruggecr/shap-e/shap-e-env/lib/python3.10/site-packages']
+Python site-packages: ['/panfs/accrepfs.vampire/home/bruggecr/shap-e/shap-e-env/lib/python3.10/site-packages']
+GPU Check: Sun Feb  9 02:12:52 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.54.15              Driver Version: 550.54.15      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA TITAN Xp                On  |   00000000:02:00.0 Off |                  N/A |
+| 23%   30C    P8              9W /  250W |       1MiB /  12288MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA TITAN Xp                On  |   00000000:03:00.0 Off |                  N/A |
+| 23%   29C    P8              9W /  250W |       1MiB /  12288MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Using device: cuda
+Loading models...
