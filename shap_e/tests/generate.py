@@ -5,8 +5,8 @@ import glob
 import imageio
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-import requests.exceptions
+import shutil
+import subprocess
 
 from shap_e.diffusion.sample import sample_latents
 from shap_e.diffusion.gaussian_diffusion import diffusion_from_config
@@ -17,67 +17,98 @@ from shap_e.util.notebooks import (
     decode_latent_mesh,
 )
 
+# Suppress ALSA errors (audio system)
+os.environ["AUDIODEV"] = "null"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+os.environ["PULSE_SERVER"] = ""
+os.environ["ALSA_CARD"] = "0"
+os.environ["ALSA_PCM_CARD"] = "0"
+
 def robust_load_model(model_name, device, max_attempts=5, delay=10):
-    """Attempts to load a model with retry logic for network failures."""
     for attempt in range(1, max_attempts + 1):
         try:
             model = load_model(model_name, device=device)
             print(f"[{model_name}] Successfully loaded on {device} (Attempt {attempt}).")
             return model
-        except requests.exceptions.RequestException as e:
-            print(f"[{model_name}] Network error (Attempt {attempt}/{max_attempts}): {e}")
         except Exception as e:
             print(f"[{model_name}] Error loading model (Attempt {attempt}/{max_attempts}): {e}")
-        if attempt < max_attempts:
-            print(f"Retrying in {delay} seconds...")
             time.sleep(delay)
     raise RuntimeError(f"Failed to load model {model_name} after {max_attempts} attempts.")
 
-def init_process(rank, world_size, batch_size, fn, backend="nccl"):
-    """Initialize the process group for distributed processing."""
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
-    fn(rank, world_size, batch_size)
-    dist.destroy_process_group()
+def generate_gif(xm, latent, filename, device):
+    try:
+        cameras = create_pan_cameras(128, device)
+        images = decode_latent_images(xm.module, latent, cameras, rendering_mode="nerf")
 
-def get_next_available_filename(output_dir, base_name, extension):
-    """Find the next available unique filename without overwriting."""
-    existing_files = glob.glob(os.path.join(output_dir, f"{base_name}_*.{extension}"))
-    existing_indices = sorted(
-        [int(f.split("_")[-1].split(".")[0]) for f in existing_files if f.split("_")[-1].split(".")[0].isdigit()]
-    )
+        if not images or len(images) == 0:
+            print(f"Skipping empty GIF generation: {filename}")
+            return
 
-    index = (existing_indices[-1] + 1) if existing_indices else 0
+        imageio.mimsave(filename, images, duration=0.08, loop=0)
+        print(f"GIF saved: {filename}")
+    except Exception as e:
+        print(f"GIF generation error for {filename}: {e}")
 
-    return os.path.join(output_dir, f"{base_name}_{index}.{extension}")
+def get_next_filename(output_dir, extension):
+    existing_files = glob.glob(os.path.join(output_dir, f"object_*{extension}"))
+    numbers = [int(f.split("_")[-1].split(".")[0]) for f in existing_files if f.split("_")[-1].split(".")[0].isdigit()]
+    next_number = max(numbers) + 1 if numbers else 1
+    return os.path.join(output_dir, f"object_{next_number}{extension}")
+
+def clean_and_thicken_mesh_in_blender(obj_filename, ply_filename):
+    blender_path = os.path.expanduser("~/software/blender/blender")
+    subprocess.run([blender_path, "--background", "--python-expr",
+        f"""
+import bpy
+import sys
+
+obj_path, ply_path = sys.argv[-2], sys.argv[-1]
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+bpy.ops.import_scene.obj(filepath=obj_path, use_split_groups=False)
+mesh = bpy.context.selected_objects[0]
+bpy.context.view_layer.objects.active = mesh
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='SELECT')
+bpy.ops.mesh.remove_doubles(threshold=0.01)
+bpy.ops.mesh.fill_holes(sides=6)
+bpy.ops.mesh.normals_make_consistent(inside=False)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+solidify_mod = mesh.modifiers.new(name='Solidify', type='SOLIDIFY')
+solidify_mod.thickness = 0.05
+bpy.ops.object.modifier_apply(modifier='Solidify')
+
+bpy.ops.export_scene.obj(filepath=obj_path.replace('.obj', '_after.obj'), use_materials=False, use_triangles=True)
+bpy.ops.export_mesh.ply(filepath=ply_path)
+bpy.ops.wm.quit_blender()
+""",
+        "--", obj_filename, ply_filename])
 
 def train(rank, world_size, batch_size):
-    """Distributed processing for latent generation, broadcasting, and 3D model decoding."""
-    print(f"[Rank {rank}] Process started.")
+    device = torch.device("cuda", rank)
     torch.cuda.set_device(rank)
-
-    output_dir = os.path.abspath("generated_3d_models")
-    if rank == 0:
-        os.makedirs(output_dir, exist_ok=True)
+    
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    
+    output_dir = os.path.abspath(os.path.expanduser("~/shap-e/shap_e/tests/generated_3d_models"))
+    os.makedirs(output_dir, exist_ok=True)
     dist.barrier()
-
-    xm = robust_load_model("transmitter", device=torch.device("cuda", rank))
-    xm = DDP(xm, device_ids=[rank], output_device=rank)
-
-    local_batch_size = batch_size // world_size
-    extra = batch_size % world_size
-
-    if rank < extra:
-        local_batch_size += 1
-
-    latents = None
+    
+    xm = robust_load_model("transmitter", device)
+    xm = torch.nn.parallel.DistributedDataParallel(xm, device_ids=[rank], output_device=rank)
+    
+    local_batch_size = max(1, (batch_size + world_size - 1 - rank) // world_size)
+    
     if local_batch_size > 0:
-        print(f"[Rank {rank}] Generating {local_batch_size} latents...")
-        model = robust_load_model("text300M", device=torch.device("cuda", rank))
+        model = robust_load_model("text300M", device)
         diffusion = diffusion_from_config(load_config("diffusion"))
-
         prompt = os.getenv("PROMPT", "a man")
+        
         latents = sample_latents(
             batch_size=local_batch_size,
             model=model,
@@ -93,51 +124,30 @@ def train(rank, world_size, batch_size):
             sigma_max=160,
             s_churn=0,
         )
-        print(f"[Rank {rank}] Latents generated: {len(latents)}")
-
-    if latents is not None:
-        latents = [torch.tensor(lt, dtype=torch.float32, device="cuda").clone().detach() for lt in latents]
-        latents_tensor = torch.stack(latents, dim=0)
-    else:
-        latents_tensor = torch.zeros((batch_size, 1048576), dtype=torch.float32, device="cuda")
-
-    all_latents = [torch.zeros_like(latents_tensor) for _ in range(world_size)]
-    dist.all_gather(all_latents, latents_tensor)
-
-    latents = [lt for lt in all_latents if lt.sum().item() != 0]
-
+    
     for i, latent in enumerate(latents):
-        if (i // world_size) % world_size == rank:
-            ply_filename = get_next_available_filename(output_dir, "object", "ply")
-            obj_filename = get_next_available_filename(output_dir, "object", "obj")
-            gif_filename = get_next_available_filename(output_dir, "object", "gif")
+        obj_before = get_next_filename(output_dir, ".obj")
+        obj_after = obj_before.replace(".obj", "_after.obj")
+        ply_after = obj_before.replace(".obj", "_after.ply")
+        gif_before = obj_before.replace(".obj", ".gif")
+        gif_after = obj_after.replace(".obj", ".gif")
 
-            print(f"[Rank {rank}] Processing latent {i}:")
-            mesh = decode_latent_mesh(xm.module, latent)
-            tri_mesh = mesh.tri_mesh()
-            with open(ply_filename, "wb") as f:
-                tri_mesh.write_ply(f)
-            with open(obj_filename, "w") as f:
-                tri_mesh.write_obj(f)
-            print(f"[Rank {rank}] Mesh files saved for latent {i}.")
+        mesh = decode_latent_mesh(xm.module, latent)
+        tri_mesh = mesh.tri_mesh()
+        with open(obj_before, "w") as f:
+            tri_mesh.write_obj(f)
 
-            # **Generate GIF Preview**
-            try:
-                cameras = create_pan_cameras(128, torch.device("cuda", rank))
-                images = decode_latent_images(xm.module, latent, cameras, rendering_mode="nerf")
-                imageio.mimsave(gif_filename, images, duration=0.08, loop=0)
-                print(f"[Rank {rank}] GIF saved for latent {i}.")
-            except Exception as e:
-                print(f"[Rank {rank}] GIF generation error for latent {i}: {e}")
-
-    print(f"[Rank {rank}] Decoding complete.")
+        generate_gif(xm, latent, gif_before, device)
+        clean_and_thicken_mesh_in_blender(obj_before, ply_after)
+        generate_gif(xm, latent, gif_after, device)
+    
     dist.barrier()
+    dist.destroy_process_group()
 
 def main():
     world_size = torch.cuda.device_count()
-    batch_size = int(os.getenv("BATCH_SIZE", 1))
-    used_gpus = min(world_size, batch_size)
-    mp.spawn(init_process, args=(used_gpus, batch_size, train), nprocs=used_gpus, join=True)
+    batch_size = int(os.getenv("BATCH_SIZE", 2))
+    mp.spawn(train, args=(world_size, batch_size), nprocs=world_size, join=True)
 
 if __name__ == "__main__":
     main()
