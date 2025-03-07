@@ -17,13 +17,6 @@ from shap_e.util.notebooks import (
     decode_latent_mesh,
 )
 
-# Suppress ALSA errors (audio system)
-os.environ["AUDIODEV"] = "null"
-os.environ["SDL_AUDIODRIVER"] = "dummy"
-os.environ["PULSE_SERVER"] = ""
-os.environ["ALSA_CARD"] = "0"
-os.environ["ALSA_PCM_CARD"] = "0"
-
 def robust_load_model(model_name, device, max_attempts=5, delay=10):
     for attempt in range(1, max_attempts + 1):
         try:
